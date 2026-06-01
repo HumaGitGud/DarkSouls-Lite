@@ -1,4 +1,18 @@
 use bevy::prelude::*;
+use bevy::input::mouse::MouseMotion;
+use bevy::window::CursorGrabMode;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::image::{ImageSampler, ImageSamplerDescriptor, ImageAddressMode, ImageFilterMode};
+
+#[derive(Component)]
+struct Player;
+
+#[derive(Component)]
+struct PlayerVelocity { vertical: f32 }
+
+#[derive(Component)]
+struct PlayerCamera { pitch: f32, bob_timer: f32 }
 
 fn main() {
     App::new()
@@ -10,42 +24,224 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(ClearColor(Color::srgb(0.06, 0.08, 0.22)))
         .add_systems(Startup, setup)
+        .add_systems(Update, (player_movement, camera_look, head_bob, cursor_grab))
         .run();
+}
+
+fn make_grass_texture(images: &mut Assets<Image>) -> Handle<Image> {
+    // 6-shade retro grass palette: dark → bright greens + yellow-green
+    let pal: &[[u8; 3]] = &[
+        [15, 48, 12],  // 0 very dark
+        [22, 65, 16],  // 1 dark green
+        [32, 85, 22],  // 2 medium green
+        [42, 105, 28], // 3 light green
+        [52, 92, 18],  // 4 yellow-green
+        [28, 75, 20],  // 5 mid-dark
+    ];
+    // 8x8 hand-placed pattern — no two same neighbours, organic feel
+    #[rustfmt::skip]
+    let pat: &[u8] = &[
+        1,0,3,5,2,4,0,3,
+        4,2,1,0,5,1,3,2,
+        0,5,4,2,1,3,5,1,
+        3,1,0,5,4,0,2,4,
+        5,3,2,1,0,5,1,0,
+        2,0,5,4,3,2,4,3,
+        4,3,1,0,5,1,0,5,
+        0,5,4,3,2,4,3,2,
+    ];
+    let size = 8u32;
+    let mut data: Vec<u8> = Vec::with_capacity((size * size * 4) as usize);
+    for &p in pat {
+        let c = pal[p as usize];
+        data.extend_from_slice(&[c[0], c[1], c[2], 255]);
+    }
+    let mut image = Image::new(
+        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Nearest,
+        ..default()
+    });
+    images.add(image)
 }
 
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
-    // Floor
+    // Ground
+    let grass = make_grass_texture(&mut images);
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 20.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.3, 0.3))),
-        Transform::from_xyz(0.0, 0.0, 0.0),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color_texture: Some(grass),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::new(50.0, 50.0)),
+            perceptual_roughness: 1.0,
+            ..default()
+        })),
+        Transform::default(),
     ));
 
-    // Player (capsule)
-    commands.spawn((
-        Mesh3d(meshes.add(Capsule3d::new(0.4, 1.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
-        Transform::from_xyz(0.0, 1.0, 0.0),
-    ));
-
-    // Light
+    // Moonlight
     commands.spawn((
         DirectionalLight {
-            illuminance: 10000.0,
+            color: Color::srgb(0.65, 0.75, 1.0),
+            illuminance: 2200.0,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(-30.0, 50.0, -20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Camera
+    // Bright ambient so the scene is readable
+    commands.insert_resource(AmbientLight {
+        color: Color::srgb(0.30, 0.35, 0.55),
+        brightness: 320.0,
+    });
+
+    // Moon — large bright sphere, high in the sky
+    let moon_dir = Vec3::new(-0.6, 1.4, -1.0).normalize();
     commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 6.0, 10.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        Mesh3d(meshes.add(Sphere::new(11.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.95, 0.96, 0.85),
+            emissive: LinearRgba::new(5.0, 5.0, 4.0, 1.0),
+            unlit: true,
+            ..default()
+        })),
+        Transform::from_translation(moon_dir * 350.0),
     ));
+
+    // Stars — small emissive cubes, upper hemisphere
+    let star_mat = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        emissive: LinearRgba::new(6.0, 6.0, 6.0, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let star_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    for i in 0..200u32 {
+        let t = i as f32;
+        let phi = (t * 47.0 % 360.0).to_radians();
+        let el  = ((t * 23.0 % 70.0) + 10.0).to_radians();
+        let r   = 360.0 + (i % 25) as f32;
+        let x = r * el.cos() * phi.cos();
+        let y = r * el.sin();
+        let z = r * el.cos() * phi.sin();
+        let size = 0.5 + (i % 4) as f32 * 0.3;
+        commands.spawn((
+            Mesh3d(star_mesh.clone()),
+            MeshMaterial3d(star_mat.clone()),
+            Transform::from_xyz(x, y, z).with_scale(Vec3::splat(size)),
+        ));
+    }
+
+    // Player + first-person camera
+    commands
+        .spawn((
+            Player,
+            Transform::from_xyz(0.0, 0.0, 10.0),
+            GlobalTransform::default(),
+            Visibility::default(),
+            PlayerVelocity { vertical: 0.0 },
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Camera3d::default(),
+                Transform::from_xyz(0.0, 1.7, 0.0),
+                PlayerCamera { pitch: 0.0, bob_timer: 0.0 },
+            ));
+        });
+}
+
+fn cursor_grab(
+    mut windows: Query<&mut Window>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    key: Res<ButtonInput<KeyCode>>,
+) {
+    let mut window = windows.single_mut();
+    if mouse.just_pressed(MouseButton::Left) {
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+        window.cursor_options.visible = false;
+    }
+    if key.just_pressed(KeyCode::Escape) {
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+        window.cursor_options.visible = true;
+    }
+}
+
+fn player_movement(
+    key: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut player_q: Query<(&mut Transform, &mut PlayerVelocity), With<Player>>,
+) {
+    let (mut transform, mut velocity) = player_q.single_mut();
+    let dt = time.delta_secs();
+
+    let sprinting = key.pressed(KeyCode::ShiftLeft) || key.pressed(KeyCode::ShiftRight);
+    let speed = if sprinting { 12.0 } else { 6.0 };
+
+    let fwd = *transform.forward();
+    let right = *transform.right();
+    let forward    = Vec3::new(fwd.x,   0.0, fwd.z  ).normalize_or_zero();
+    let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+
+    let mut dir = Vec3::ZERO;
+    if key.pressed(KeyCode::KeyW) { dir += forward; }
+    if key.pressed(KeyCode::KeyS) { dir -= forward; }
+    if key.pressed(KeyCode::KeyA) { dir -= right_flat; }
+    if key.pressed(KeyCode::KeyD) { dir += right_flat; }
+    if dir.length_squared() > 0.0 {
+        transform.translation += dir.normalize() * speed * dt;
+    }
+
+    let on_ground = transform.translation.y <= 0.0;
+    if key.just_pressed(KeyCode::Space) && on_ground {
+        velocity.vertical = 8.5;
+    }
+    velocity.vertical -= 22.0 * dt;
+    transform.translation.y += velocity.vertical * dt;
+    if transform.translation.y < 0.0 {
+        transform.translation.y = 0.0;
+        velocity.vertical = 0.0;
+    }
+}
+
+fn camera_look(
+    mut mouse_motion: EventReader<MouseMotion>,
+    mut player_q: Query<&mut Transform, (With<Player>, Without<PlayerCamera>)>,
+    mut camera_q: Query<(&mut Transform, &mut PlayerCamera), Without<Player>>,
+) {
+    let sensitivity = 0.003;
+    let (mut cam_t, mut ctrl) = camera_q.single_mut();
+    let mut player_t = player_q.single_mut();
+    for ev in mouse_motion.read() {
+        player_t.rotate_y(-ev.delta.x * sensitivity);
+        ctrl.pitch = (ctrl.pitch - ev.delta.y * sensitivity).clamp(-1.4, 1.4);
+        cam_t.rotation = Quat::from_rotation_x(ctrl.pitch);
+    }
+}
+
+fn head_bob(
+    key: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut camera_q: Query<(&mut Transform, &mut PlayerCamera)>,
+) {
+    let (mut t, mut ctrl) = camera_q.single_mut();
+    let moving = key.pressed(KeyCode::KeyW) || key.pressed(KeyCode::KeyS)
+              || key.pressed(KeyCode::KeyA) || key.pressed(KeyCode::KeyD);
+    if moving { ctrl.bob_timer += time.delta_secs() * 9.0; }
+    t.translation.y = 1.7 + if moving { ctrl.bob_timer.sin() * 0.045 } else { 0.0 };
 }
