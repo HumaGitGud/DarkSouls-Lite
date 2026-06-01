@@ -25,7 +25,7 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.08, 0.22)))
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, spawn_castle))
         .add_systems(Update, (player_movement, camera_look, head_bob, cursor_grab))
         .run();
 }
@@ -173,7 +173,7 @@ fn setup(
         let z     = dist * angle.sin();
 
         if x.abs() < 14.0 && z > -6.0 && z < 22.0 { continue; }   // player spawn
-        if x.abs() < 42.0 && z < -28.0 && z > -110.0 { continue; } // castle zone
+        if x.abs() < 48.0 && z < -38.0 && z > -142.0 { continue; } // castle zone
 
         let base = Vec3::new(x, 0.0, z);
 
@@ -219,6 +219,163 @@ fn setup(
                 PlayerCamera { pitch: 0.0, bob_timer: 0.0 },
             ));
         });
+}
+
+fn spawn_castle(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let stone = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.38, 0.36, 0.40),
+        perceptual_roughness: 0.95, ..default()
+    });
+    let dark_stone = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.23, 0.28),
+        perceptual_roughness: 0.95, ..default()
+    });
+    let wood = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.42, 0.26, 0.12),
+        perceptual_roughness: 1.0, ..default()
+    });
+    let bone_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.74, 0.70, 0.62),
+        perceptual_roughness: 0.8, ..default()
+    });
+    let flame_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.6, 0.05),
+        emissive: LinearRgba::new(5.0, 2.2, 0.1, 1.0),
+        unlit: true, ..default()
+    });
+
+    // Castle layout — center (0, 0, -90), 88×88 outer footprint
+    let cz    = -90.0f32;
+    let hw    =  44.0f32;  // half-width  (x: -44 to 44)
+    let hd    =  44.0f32;  // half-depth  (z: -46 to -134)
+    let wh    =  18.0f32;  // wall height
+    let wt    =   3.5f32;  // wall thickness
+    let gate  =   7.0f32;  // gate half-width
+
+    let front_z = cz + hd; // -46
+    let back_z  = cz - hd; // -134
+    let side_w  = hw - gate; // 37
+
+    // ── Perimeter walls ──────────────────────────────────────
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(side_w, wh, wt))),
+        MeshMaterial3d(stone.clone()),
+        Transform::from_xyz(-gate - side_w*0.5, wh*0.5, front_z)));
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(side_w, wh, wt))),
+        MeshMaterial3d(stone.clone()),
+        Transform::from_xyz( gate + side_w*0.5, wh*0.5, front_z)));
+    let lintel_h = wh - 13.0;
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(gate*2.0, lintel_h, wt))),
+        MeshMaterial3d(dark_stone.clone()),
+        Transform::from_xyz(0.0, 13.0 + lintel_h*0.5, front_z)));
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(hw*2.0, wh, wt))),
+        MeshMaterial3d(stone.clone()),
+        Transform::from_xyz(0.0, wh*0.5, back_z)));
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(wt, wh, hd*2.0))),
+        MeshMaterial3d(stone.clone()),
+        Transform::from_xyz(-hw, wh*0.5, cz)));
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(wt, wh, hd*2.0))),
+        MeshMaterial3d(stone.clone()),
+        Transform::from_xyz( hw, wh*0.5, cz)));
+
+    // ── Corner towers ─────────────────────────────────────────
+    let tw = 10.0f32; let th = 26.0f32;
+    for (tx, tz) in [(-hw, front_z),(hw, front_z),(-hw, back_z),(hw, back_z)] {
+        commands.spawn((Mesh3d(meshes.add(Cuboid::new(tw, th, tw))),
+            MeshMaterial3d(dark_stone.clone()),
+            Transform::from_xyz(tx, th*0.5, tz)));
+    }
+
+    // ── Keep ──────────────────────────────────────────────────
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(20.0, 34.0, 20.0))),
+        MeshMaterial3d(dark_stone.clone()),
+        Transform::from_xyz(0.0, 17.0, cz - 12.0)));
+
+    // ── Battlements (all four walls) ──────────────────────────
+    let bw = 2.5f32; let bh = 4.0f32; let bs = 5.5f32;
+    // front left
+    let mut x = -hw + 2.0;
+    while x < -gate - bw { commands.spawn((Mesh3d(meshes.add(Cuboid::new(bw,bh,wt))),MeshMaterial3d(stone.clone()),Transform::from_xyz(x,wh+bh*0.5,front_z))); x+=bs; }
+    // front right
+    let mut x = gate + 2.0;
+    while x < hw { commands.spawn((Mesh3d(meshes.add(Cuboid::new(bw,bh,wt))),MeshMaterial3d(stone.clone()),Transform::from_xyz(x,wh+bh*0.5,front_z))); x+=bs; }
+    // back
+    let mut x = -hw + 2.0;
+    while x < hw { commands.spawn((Mesh3d(meshes.add(Cuboid::new(bw,bh,wt))),MeshMaterial3d(stone.clone()),Transform::from_xyz(x,wh+bh*0.5,back_z))); x+=bs; }
+    // sides
+    for wx in [-hw, hw] {
+        let mut z = back_z + 2.0;
+        while z < front_z { commands.spawn((Mesh3d(meshes.add(Cuboid::new(wt,bh,bw))),MeshMaterial3d(stone.clone()),Transform::from_xyz(wx,wh+bh*0.5,z))); z+=bs; }
+    }
+
+    // ── Interior pillars ──────────────────────────────────────
+    let pillar = meshes.add(Cuboid::new(3.5, 17.0, 3.5));
+    for (px, pz) in [(-20.0f32,-72.0f32),(20.0,-72.0),(-20.0,-108.0),(20.0,-108.0)] {
+        commands.spawn((Mesh3d(pillar.clone()), MeshMaterial3d(dark_stone.clone()),
+            Transform::from_xyz(px, 8.5, pz)));
+    }
+
+    // ── Altar ─────────────────────────────────────────────────
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(24.0, 1.8, 12.0))),
+        MeshMaterial3d(dark_stone.clone()),
+        Transform::from_xyz(0.0, 0.9, cz - 30.0)));
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(24.0, 0.7, 3.0))),
+        MeshMaterial3d(stone.clone()),
+        Transform::from_xyz(0.0, 0.35, cz - 25.5)));
+
+    // ── Barrels ───────────────────────────────────────────────
+    let barrel = meshes.add(Cylinder { radius: 0.55, half_height: 0.65 });
+    for (bx, bz) in [(-40.0f32,-60.0f32),(-38.0,-62.5),(39.0,-61.0),(-39.0,-118.0),(38.0,-117.0)] {
+        commands.spawn((Mesh3d(barrel.clone()), MeshMaterial3d(wood.clone()),
+            Transform::from_xyz(bx, 0.65, bz)));
+    }
+
+    // ── Crates ────────────────────────────────────────────────
+    let crate_m = meshes.add(Cuboid::new(1.2, 1.1, 1.2));
+    for (cx2,cz2) in [(-41.0f32,-75.0f32),(-40.5,-76.5),(40.0,-92.0),(40.5,-93.5),(-41.0,-105.0)] {
+        commands.spawn((Mesh3d(crate_m.clone()), MeshMaterial3d(wood.clone()),
+            Transform::from_xyz(cx2, 0.55, cz2)));
+    }
+
+    // ── Bone piles ────────────────────────────────────────────
+    let bone = meshes.add(Cuboid::new(0.9, 0.14, 0.45));
+    for (bx,bz) in [(-22.0f32,-68.0f32),(21.0,-74.0),(-16.0,-112.0),(24.0,-98.0),(3.0,-132.0)] {
+        commands.spawn((Mesh3d(bone.clone()), MeshMaterial3d(bone_mat.clone()),
+            Transform::from_xyz(bx, 0.07, bz)));
+    }
+
+    // ── Torches (handle + flame + point light) ────────────────
+    let t_handle = meshes.add(Cuboid::new(0.16, 0.9, 0.16));
+    let t_flame  = meshes.add(Cuboid::new(0.24, 0.30, 0.24));
+    let torch_spots = [
+        Vec3::new(-10.0, 4.5, front_z + 2.0),  // gate left
+        Vec3::new( 10.0, 4.5, front_z + 2.0),  // gate right
+        Vec3::new(-hw + 2.5, 5.0, -72.0),      // left wall front
+        Vec3::new(-hw + 2.5, 5.0, -108.0),     // left wall back
+        Vec3::new( hw - 2.5, 5.0, -72.0),      // right wall front
+        Vec3::new( hw - 2.5, 5.0, -108.0),     // right wall back
+        Vec3::new(-10.0, 5.0, cz - 26.0),      // keep entrance left
+        Vec3::new( 10.0, 5.0, cz - 26.0),      // keep entrance right
+    ];
+    for p in torch_spots {
+        commands.spawn((Mesh3d(t_handle.clone()), MeshMaterial3d(wood.clone()),
+            Transform::from_translation(p)));
+        commands.spawn((Mesh3d(t_flame.clone()), MeshMaterial3d(flame_mat.clone()),
+            Transform::from_translation(p + Vec3::Y * 0.62)));
+        commands.spawn((
+            PointLight {
+                color: Color::srgb(1.0, 0.55, 0.15),
+                intensity: 120_000.0,
+                range: 22.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::from_translation(p + Vec3::Y * 0.75),
+        ));
+    }
 }
 
 fn cursor_grab(
