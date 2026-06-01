@@ -9,7 +9,7 @@ use bevy::image::{ImageSampler, ImageSamplerDescriptor, ImageAddressMode, ImageF
 struct Player;
 
 #[derive(Component)]
-struct PlayerVelocity { vertical: f32 }
+struct PlayerVelocity { vertical: f32, knockback: Vec3 }
 
 #[derive(Component)]
 struct PlayerCamera { pitch: f32, bob_timer: f32 }
@@ -33,13 +33,39 @@ struct Skeleton {
     attack_timer: f32,
     patrol_timer: f32,
     patrol_dir: Vec3,
+    damage_flash: f32,
+    knockback_vel: Vec3,
 }
 
 #[derive(Component)]
 struct HeartNode { index: u32 }
 
+#[derive(Component)]
+struct DamageVignette;
+
 #[derive(Resource)]
 struct PlayerHealth { hearts: i32, hurt_timer: f32 }
+
+
+#[derive(Resource)]
+struct SkeletonMaterials { bone: Handle<StandardMaterial>, flash: Handle<StandardMaterial> }
+
+#[derive(Component, PartialEq, Clone)]
+enum DragonState { Idle, Active, Dead }
+
+#[derive(Component)]
+struct Dragon { health: f32, fireball_timer: f32, damage_flash: f32, state: DragonState }
+
+#[derive(Component)]
+struct Fireball { velocity: Vec3, life: f32 }
+
+#[derive(Resource)]
+struct DragonAssets {
+    scale_mat: Handle<StandardMaterial>,
+    flash_mat: Handle<StandardMaterial>,
+    fb_mat:    Handle<StandardMaterial>,
+    fb_mesh:   Handle<Mesh>,
+}
 
 fn main() {
     App::new()
@@ -53,10 +79,12 @@ fn main() {
         }))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.08, 0.22)))
         .insert_resource(PlayerHealth { hearts: 5, hurt_timer: 0.0 })
-        .add_systems(Startup, (setup, spawn_castle, spawn_skeletons, setup_hud))
+        .add_systems(Startup, (setup, spawn_castle, spawn_skeletons, setup_hud, spawn_dragon))
         .add_systems(Update, (player_movement, camera_look, head_bob, cursor_grab,
                                sword_swing, animate_lightning, lightning_bolts,
-                               skeleton_ai, lightning_damage, update_hearts))
+                               skeleton_ai, skeleton_flash, lightning_damage,
+                               dragon_ai, dragon_flash, move_fireballs,
+                               update_hearts, update_vignette))
         .run();
 }
 
@@ -248,7 +276,7 @@ fn setup(
     let player_e = commands.spawn((
         Player, Transform::from_xyz(0.0, 0.0, 10.0),
         GlobalTransform::default(), Visibility::default(),
-        PlayerVelocity { vertical: 0.0 },
+        PlayerVelocity { vertical: 0.0, knockback: Vec3::ZERO },
     )).id();
     let camera_e = commands.spawn((
         Camera3d::default(),
@@ -265,15 +293,15 @@ fn setup(
         Sword { swinging: false, timer: 0.0, hit_registered: false },
     )).set_parent(camera_e).id();
 
-    // Blade — very thin (0.007 depth = real sword thinness)
-    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.08, 0.44, 0.007))),
+    // Blade — narrow and very thin (real sword profile)
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.036, 0.44, 0.007))),
         MeshMaterial3d(blade_mat),
         Transform::from_xyz(0.0, 0.22, 0.0), Visibility::default(),
     )).set_parent(sword_root);
-    // Bright edge strip (even thinner, offset to side)
-    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.010, 0.44, 0.009))),
+    // Bright edge strip
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.005, 0.44, 0.009))),
         MeshMaterial3d(blade_edge),
-        Transform::from_xyz(-0.045, 0.22, 0.0), Visibility::default(),
+        Transform::from_xyz(-0.021, 0.22, 0.0), Visibility::default(),
     )).set_parent(sword_root);
     // Crossguard
     commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.22, 0.046, 0.050))),
@@ -364,6 +392,7 @@ fn sword_swing(
     mut sword_q: Query<(&mut Transform, &mut Sword)>,
     camera_q: Query<&GlobalTransform, With<PlayerCamera>>,
     mut skeleton_q: Query<(Entity, &GlobalTransform, &mut Skeleton)>,
+    mut dragon_q: Query<(Entity, &GlobalTransform, &mut Dragon)>,
     mut commands: Commands,
 ) {
     let window = windows.single();
@@ -403,8 +432,25 @@ fn sword_swing(
                 let dist = to.length();
                 if dist < 3.5 && dist > 0.1 && fwd.dot(to / dist) > 0.3 {
                     skel.health -= 1.0;
+                    skel.damage_flash = 0.25;
+                    let knock = Vec3::new(to.x, 0.0, to.z).normalize_or_zero();
+                    skel.knockback_vel = knock * 7.0;
                     if skel.health <= 0.0 {
                         skel.state = SkeletonState::Dead;
+                        commands.entity(entity).despawn_recursive();
+                    }
+                }
+            }
+            // Dragon hit
+            for (entity, dgt, mut drag) in dragon_q.iter_mut() {
+                if drag.state == DragonState::Dead { continue; }
+                let to = dgt.translation() - cam_pos;
+                let dist = to.length();
+                if dist < 5.5 && dist > 0.1 && fwd.dot(to / dist) > 0.2 {
+                    drag.health -= 1.0;
+                    drag.damage_flash = 0.25;
+                    if drag.health <= 0.0 {
+                        drag.state = DragonState::Dead;
                         commands.entity(entity).despawn_recursive();
                     }
                 }
@@ -490,6 +536,12 @@ fn spawn_skeletons(
         base_color: Color::srgb(0.80, 0.76, 0.64),
         perceptual_roughness: 0.9, ..default()
     });
+    let flash = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.08, 0.08),
+        emissive: LinearRgba::new(2.0, 0.1, 0.1, 1.0),
+        ..default()
+    });
+    commands.insert_resource(SkeletonMaterials { bone: bone.clone(), flash });
     // Pre-build mesh handles (shared across all skeletons)
     let head    = meshes.add(Cuboid::new(0.22, 0.22, 0.22));
     let torso   = meshes.add(Cuboid::new(0.30, 0.52, 0.13));
@@ -520,7 +572,8 @@ fn spawn_skeletons(
             GlobalTransform::default(),
             Visibility::default(),
             Skeleton { health: 5.0, state: SkeletonState::Patrol,
-                attack_timer: 1.5, patrol_timer: 2.0 + i as f32 * 0.4, patrol_dir },
+                attack_timer: 1.5, patrol_timer: 2.0 + i as f32 * 0.4, patrol_dir,
+                damage_flash: 0.0, knockback_vel: Vec3::ZERO },
         )).with_children(|p| {
             // head
             p.spawn((Mesh3d(head.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz( 0.00, 1.72, 0.0)));
@@ -551,6 +604,7 @@ fn skeleton_ai(
     mut commands: Commands,
     mut skel_q: Query<(Entity, &mut Transform, &mut Skeleton)>,
     player_q: Query<&Transform, (With<Player>, Without<Skeleton>)>,
+    mut player_vel_q: Query<&mut PlayerVelocity, With<Player>>,
     mut health: ResMut<PlayerHealth>,
 ) {
     if health.hurt_timer > 0.0 { health.hurt_timer -= time.delta_secs(); }
@@ -559,10 +613,16 @@ fn skeleton_ai(
 
     for (entity, mut t, mut sk) in skel_q.iter_mut() {
         if sk.state == SkeletonState::Dead { continue; }
+
+        // Apply and decay knockback
+        if sk.knockback_vel.length_squared() > 0.01 {
+            t.translation += sk.knockback_vel * time.delta_secs();
+            sk.knockback_vel *= (1.0 - 8.0 * time.delta_secs()).max(0.0);
+            t.translation.y = 0.0;
+        }
+
         let flat = Vec3::new(pp.x - t.translation.x, 0.0, pp.z - t.translation.z);
         let dist = flat.length();
-
-        // State transitions
         sk.state = if dist < 2.2 { SkeletonState::Attack }
                    else if dist < 20.0 { SkeletonState::Chase }
                    else { SkeletonState::Patrol };
@@ -595,6 +655,9 @@ fn skeleton_ai(
                     health.hearts = (health.hearts - 1).max(0);
                     health.hurt_timer = 0.9;
                     sk.attack_timer = 1.5;
+                    // Knock player away from skeleton
+                    let mut pvel = player_vel_q.single_mut();
+                    pvel.knockback = Vec3::new(flat.x, 0.0, flat.z).normalize_or_zero() * 5.5;
                 }
             }
             SkeletonState::Dead => { commands.entity(entity).despawn_recursive(); }
@@ -608,6 +671,7 @@ fn lightning_damage(
     time: Res<Time>,
     camera_q: Query<&GlobalTransform, With<PlayerCamera>>,
     mut skel_q: Query<(Entity, &GlobalTransform, &mut Skeleton)>,
+    mut dragon_q: Query<(Entity, &GlobalTransform, &mut Dragon)>,
     mut commands: Commands,
 ) {
     let window = windows.single();
@@ -616,51 +680,262 @@ fn lightning_damage(
     let cam = camera_q.single();
     let (_, rot, pos) = cam.to_scale_rotation_translation();
     let fwd = rot * Vec3::NEG_Z;
+    let dt = time.delta_secs();
     for (entity, sgt, mut sk) in skel_q.iter_mut() {
         if sk.state == SkeletonState::Dead { continue; }
         let to = sgt.translation() + Vec3::Y - pos;
         let dist = to.length();
         if dist < 0.5 { continue; }
         if dist < 9.0 && fwd.dot(to / dist) > 0.5 {
-            sk.health -= 2.0 * time.delta_secs();
-            if sk.health <= 0.0 {
-                sk.state = SkeletonState::Dead;
-                commands.entity(entity).despawn_recursive();
-            }
+            sk.health -= 2.0 * dt;
+            if sk.health <= 0.0 { sk.state = SkeletonState::Dead; commands.entity(entity).despawn_recursive(); }
+        }
+    }
+    for (entity, dgt, mut drag) in dragon_q.iter_mut() {
+        if drag.state == DragonState::Dead { continue; }
+        let to = dgt.translation() + Vec3::Y * 2.0 - pos;
+        let dist = to.length();
+        if dist < 0.5 { continue; }
+        if dist < 12.0 && fwd.dot(to / dist) > 0.4 {
+            drag.health -= 2.0 * dt;
+            drag.damage_flash = 0.12;
+            if drag.health <= 0.0 { drag.state = DragonState::Dead; commands.entity(entity).despawn_recursive(); }
         }
     }
 }
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
 fn setup_hud(mut commands: Commands) {
+    // Hearts row (top-left) — Unicode ♥ characters, colored by health state
     commands.spawn(Node {
         position_type: PositionType::Absolute,
-        left: Val::Px(18.0),
-        top: Val::Px(18.0),
-        flex_direction: FlexDirection::Row,
-        column_gap: Val::Px(8.0),
+        left: Val::Px(16.0), top: Val::Px(16.0),
+        flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0),
         ..default()
     }).with_children(|p| {
         for i in 0..5u32 {
             p.spawn((
-                Node { width: Val::Px(32.0), height: Val::Px(32.0), ..default() },
-                BackgroundColor(Color::srgb(0.85, 0.10, 0.10)),
+                Text::new("♥"),
+                TextFont { font_size: 40.0, ..default() },
+                TextColor(Color::srgb(0.9, 0.1, 0.1)),
                 HeartNode { index: i },
             ));
         }
     });
+
+    // 4 corner damage vignettes
+    for (left, top, right, bottom) in [
+        (Val::Px(0.), Val::Px(0.), Val::Auto,  Val::Auto ),
+        (Val::Auto,  Val::Px(0.), Val::Px(0.), Val::Auto ),
+        (Val::Px(0.), Val::Auto,  Val::Auto,   Val::Px(0.)),
+        (Val::Auto,  Val::Auto,  Val::Px(0.), Val::Px(0.)),
+    ] {
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(45.0), height: Val::Percent(45.0),
+                left, top, right, bottom,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.95, 0.0, 0.0, 0.0)),
+            DamageVignette,
+        ));
+    }
 }
 
 fn update_hearts(
     health: Res<PlayerHealth>,
-    mut hearts: Query<(&mut BackgroundColor, &HeartNode)>,
+    mut hearts: Query<(&mut TextColor, &HeartNode)>,
 ) {
-    for (mut bg, h) in hearts.iter_mut() {
-        bg.0 = if (h.index as i32) < health.hearts {
-            Color::srgb(0.88, 0.12, 0.12)
+    for (mut color, h) in hearts.iter_mut() {
+        color.0 = if (h.index as i32) < health.hearts {
+            Color::srgb(0.90, 0.12, 0.12)
         } else {
-            Color::srgb(0.20, 0.05, 0.05)
+            Color::srgb(0.22, 0.05, 0.05)
         };
+    }
+}
+
+fn update_vignette(
+    health: Res<PlayerHealth>,
+    mut vignette_q: Query<&mut BackgroundColor, With<DamageVignette>>,
+) {
+    let alpha = if health.hurt_timer > 0.0 { (health.hurt_timer / 0.9 * 0.60).min(0.60) } else { 0.0 };
+    for mut bg in vignette_q.iter_mut() {
+        bg.0 = Color::srgba(0.95, 0.0, 0.0, alpha);
+    }
+}
+
+fn skeleton_flash(
+    time: Res<Time>,
+    mats: Option<Res<SkeletonMaterials>>,
+    mut skel_q: Query<(&mut Skeleton, &Children)>,
+    mut mat_q: Query<&mut MeshMaterial3d<StandardMaterial>>,
+) {
+    let Some(m) = mats else { return; };
+    for (mut sk, children) in skel_q.iter_mut() {
+        if sk.state == SkeletonState::Dead { continue; }
+        sk.damage_flash = (sk.damage_flash - time.delta_secs()).max(0.0);
+        let handle = if sk.damage_flash > 0.0 { m.flash.clone() } else { m.bone.clone() };
+        for &child in children.iter() {
+            if let Ok(mut mat) = mat_q.get_mut(child) { mat.0 = handle.clone(); }
+        }
+    }
+}
+
+fn spawn_dragon(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let scale = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.10, 0.28, 0.10),
+        perceptual_roughness: 0.85, ..default()
+    });
+    let flash = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.9, 0.1, 0.1),
+        emissive: LinearRgba::new(2.0, 0.1, 0.1, 1.0), ..default()
+    });
+    let eye = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.0, 0.0),
+        emissive: LinearRgba::new(6.0, 0.0, 0.0, 1.0), unlit: true, ..default()
+    });
+    let fb_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.45, 0.0),
+        emissive: LinearRgba::new(4.0, 1.5, 0.0, 1.0), unlit: true, ..default()
+    });
+    let fb_mesh = meshes.add(Sphere::new(0.28));
+    commands.insert_resource(DragonAssets {
+        scale_mat: scale.clone(), flash_mat: flash,
+        fb_mat, fb_mesh,
+    });
+
+    let sc = scale;
+    // Dragon faces +Z (toward gate at z=-46), starting at z=-115
+    commands.spawn((
+        Transform::from_xyz(0.0, 0.0, -115.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+        GlobalTransform::default(), Visibility::default(),
+        Dragon { health: 20.0, fireball_timer: 4.0, damage_flash: 0.0, state: DragonState::Idle },
+    )).with_children(|p| {
+        // Body
+        p.spawn((Mesh3d(meshes.add(Cuboid::new(2.8, 2.0, 4.5))), MeshMaterial3d(sc.clone()), Transform::from_xyz(0.0, 2.2, 0.0)));
+        // Neck
+        p.spawn((Mesh3d(meshes.add(Cuboid::new(1.0, 1.4, 1.8))), MeshMaterial3d(sc.clone()), Transform::from_xyz(0.0, 3.2, -1.8)));
+        // Head
+        p.spawn((Mesh3d(meshes.add(Cuboid::new(2.0, 1.4, 2.2))), MeshMaterial3d(sc.clone()), Transform::from_xyz(0.0, 3.6, -3.6)));
+        // Snout
+        p.spawn((Mesh3d(meshes.add(Cuboid::new(0.9, 0.5, 1.2))), MeshMaterial3d(sc.clone()), Transform::from_xyz(0.0, 3.2, -4.9)));
+        // Eyes
+        for ex in [-0.65f32, 0.65] {
+            p.spawn((Mesh3d(meshes.add(Cuboid::new(0.28, 0.22, 0.15))), MeshMaterial3d(eye.clone()), Transform::from_xyz(ex, 3.9, -4.0)));
+        }
+        // Wings
+        for (wx, rz) in [(-3.8f32, 0.38f32), (3.8, -0.38)] {
+            p.spawn((Mesh3d(meshes.add(Cuboid::new(4.2, 0.18, 3.0))), MeshMaterial3d(sc.clone()),
+                Transform::from_xyz(wx, 2.8, 0.0).with_rotation(Quat::from_rotation_z(rz))));
+        }
+        // 4 legs
+        for (lx, lz) in [(-0.9f32,-1.5f32),(0.9,-1.5),(-0.9,1.5),(0.9,1.5)] {
+            p.spawn((Mesh3d(meshes.add(Cuboid::new(0.5, 1.2, 0.5))), MeshMaterial3d(sc.clone()), Transform::from_xyz(lx, 0.6, lz)));
+        }
+        // Tail
+        for &(tw,th,tl,tz,ty) in &[(1.2f32,0.9f32,1.8f32,2.8f32,1.6f32),(0.8,0.6,1.5,4.5,1.3),(0.5,0.4,1.1,6.2,1.0)] {
+            p.spawn((Mesh3d(meshes.add(Cuboid::new(tw,th,tl))), MeshMaterial3d(sc.clone()), Transform::from_xyz(0.0,ty,tz)));
+        }
+    });
+}
+
+fn dragon_ai(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut dragon_q: Query<(Entity, &mut Transform, &mut Dragon)>,
+    player_q: Query<&Transform, (With<Player>, Without<Dragon>)>,
+    assets: Option<Res<DragonAssets>>,
+) {
+    let Some(assets) = assets else { return; };
+    let pt = player_q.single();
+    let pp = pt.translation + Vec3::Y * 1.5;
+
+    for (entity, mut t, mut dragon) in dragon_q.iter_mut() {
+        if dragon.state == DragonState::Dead { continue; }
+        let to = pp - (t.translation + Vec3::Y * 3.0);
+        let dist = to.length();
+
+        if dist < 85.0 { dragon.state = DragonState::Active; }
+        if dragon.state != DragonState::Active { continue; }
+
+        // Face player (horizontal)
+        let ty = t.translation.y;
+        let look = Vec3::new(pp.x, ty, pp.z);
+        if (look - Vec3::new(t.translation.x, ty, t.translation.z)).length_squared() > 0.1 {
+            t.look_at(look, Vec3::Y);
+        }
+
+        dragon.fireball_timer -= time.delta_secs();
+        if dragon.fireball_timer <= 0.0 {
+            dragon.fireball_timer = 3.5;
+            let fwd = t.rotation * Vec3::NEG_Z;
+            let fire_pos = t.translation + Vec3::Y * 3.8 + fwd * 2.8;
+            let vel = to.normalize() * 13.0;
+            commands.spawn((
+                Mesh3d(assets.fb_mesh.clone()),
+                MeshMaterial3d(assets.fb_mat.clone()),
+                Transform::from_translation(fire_pos),
+                Fireball { velocity: vel, life: 8.0 },
+                PointLight { color: Color::srgb(1.0, 0.4, 0.0), intensity: 90_000.0,
+                    range: 14.0, shadows_enabled: false, ..default() },
+            ));
+        }
+
+        if dragon.health <= 0.0 {
+            dragon.state = DragonState::Dead;
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+
+fn dragon_flash(
+    time: Res<Time>,
+    assets: Option<Res<DragonAssets>>,
+    mut dragon_q: Query<(&mut Dragon, &Children)>,
+    mut mat_q: Query<&mut MeshMaterial3d<StandardMaterial>>,
+) {
+    let Some(a) = assets else { return; };
+    for (mut d, children) in dragon_q.iter_mut() {
+        if d.state == DragonState::Dead { continue; }
+        d.damage_flash = (d.damage_flash - time.delta_secs()).max(0.0);
+        let handle = if d.damage_flash > 0.0 { a.flash_mat.clone() } else { a.scale_mat.clone() };
+        for &child in children.iter() {
+            if let Ok(mut m) = mat_q.get_mut(child) { m.0 = handle.clone(); }
+        }
+    }
+}
+
+fn move_fireballs(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut fb_q: Query<(Entity, &mut Transform, &mut Fireball)>,
+    player_q: Query<&Transform, (With<Player>, Without<Fireball>)>,
+    mut player_vel: Query<&mut PlayerVelocity, With<Player>>,
+    mut health: ResMut<PlayerHealth>,
+) {
+    let pt = player_q.single();
+    let pp = pt.translation + Vec3::Y * 1.0;
+    for (entity, mut t, mut fb) in fb_q.iter_mut() {
+        t.translation += fb.velocity * time.delta_secs();
+        fb.life -= time.delta_secs();
+        let dist = (pp - t.translation).length();
+        if dist < 1.4 && health.hurt_timer <= 0.0 {
+            health.hearts = (health.hearts - 2).max(0);
+            health.hurt_timer = 0.9;
+            let mut pvel = player_vel.single_mut();
+            let dir = (pp - t.translation).normalize_or_zero();
+            pvel.knockback = Vec3::new(dir.x, 0.0, dir.z) * 9.0;
+            commands.entity(entity).despawn();
+        } else if fb.life <= 0.0 {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
@@ -871,6 +1146,12 @@ fn player_movement(
     if transform.translation.y < 0.0 {
         transform.translation.y = 0.0;
         velocity.vertical = 0.0;
+    }
+
+    // Apply knockback (from enemy hits / fireballs)
+    if velocity.knockback.length_squared() > 0.01 {
+        transform.translation += velocity.knockback * dt;
+        velocity.knockback *= (1.0 - 9.0 * dt).max(0.0);
     }
 }
 
