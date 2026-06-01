@@ -14,6 +14,33 @@ struct PlayerVelocity { vertical: f32 }
 #[derive(Component)]
 struct PlayerCamera { pitch: f32, bob_timer: f32 }
 
+#[derive(Component)]
+struct Sword { swinging: bool, timer: f32, hit_registered: bool }
+
+#[derive(Component)]
+struct LightningOrb;
+
+#[derive(Component)]
+struct LightningBolt { bolt_idx: u32, seg_idx: u32 }
+
+#[derive(Component, PartialEq, Clone)]
+enum SkeletonState { Patrol, Chase, Attack, Dead }
+
+#[derive(Component)]
+struct Skeleton {
+    health: f32,
+    state: SkeletonState,
+    attack_timer: f32,
+    patrol_timer: f32,
+    patrol_dir: Vec3,
+}
+
+#[derive(Component)]
+struct HeartNode { index: u32 }
+
+#[derive(Resource)]
+struct PlayerHealth { hearts: i32, hurt_timer: f32 }
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -25,8 +52,11 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.08, 0.22)))
-        .add_systems(Startup, (setup, spawn_castle))
-        .add_systems(Update, (player_movement, camera_look, head_bob, cursor_grab))
+        .insert_resource(PlayerHealth { hearts: 5, hurt_timer: 0.0 })
+        .add_systems(Startup, (setup, spawn_castle, spawn_skeletons, setup_hud))
+        .add_systems(Update, (player_movement, camera_look, head_bob, cursor_grab,
+                               sword_swing, animate_lightning, lightning_bolts,
+                               skeleton_ai, lightning_damage, update_hearts))
         .run();
 }
 
@@ -203,22 +233,435 @@ fn setup(
         ));
     }
 
-    // Player + first-person camera
-    commands
-        .spawn((
-            Player,
-            Transform::from_xyz(0.0, 0.0, 10.0),
+    // ── Materials ─────────────────────────────────────────────
+    let blade_mat  = materials.add(StandardMaterial { base_color: Color::srgb(0.68, 0.80, 0.98), emissive: LinearRgba::new(0.10, 0.16, 0.32, 1.0), perceptual_roughness: 1.0, ..default() });
+    let blade_edge = materials.add(StandardMaterial { base_color: Color::srgb(0.92, 0.96, 1.00), emissive: LinearRgba::new(0.35, 0.40, 0.55, 1.0), perceptual_roughness: 1.0, ..default() });
+    let gold_mat   = materials.add(StandardMaterial { base_color: Color::srgb(0.92, 0.75, 0.12), emissive: LinearRgba::new(0.30, 0.22, 0.02, 1.0), perceptual_roughness: 1.0, ..default() });
+    let grip_mat   = materials.add(StandardMaterial { base_color: Color::srgb(0.55, 0.08, 0.08), perceptual_roughness: 1.0, ..default() });
+    let gauntlet_m = materials.add(StandardMaterial { base_color: Color::srgb(0.18, 0.16, 0.20), perceptual_roughness: 1.0, ..default() });
+    let orb_mat    = materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.70, 1.0),  emissive: LinearRgba::new(1.8, 3.5, 7.0, 1.0),  unlit: true, ..default() });
+    let spark_mat  = materials.add(StandardMaterial { base_color: Color::WHITE, emissive: LinearRgba::new(4.0, 6.5, 11.0, 1.0), unlit: true, ..default() });
+    let bolt_mat   = materials.add(StandardMaterial { base_color: Color::srgb(0.5, 0.75, 1.0),   emissive: LinearRgba::new(3.0, 6.0, 12.0, 1.0), unlit: true, ..default() });
+    let bolt2_mat  = materials.add(StandardMaterial { base_color: Color::WHITE, emissive: LinearRgba::new(5.0, 8.0, 16.0, 1.0), unlit: true, ..default() });
+
+    // ── Player + camera ───────────────────────────────────────
+    let player_e = commands.spawn((
+        Player, Transform::from_xyz(0.0, 0.0, 10.0),
+        GlobalTransform::default(), Visibility::default(),
+        PlayerVelocity { vertical: 0.0 },
+    )).id();
+    let camera_e = commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 1.7, 0.0),
+        PlayerCamera { pitch: 0.0, bob_timer: 0.0 },
+    )).set_parent(player_e).id();
+
+    // ── Sword (right hand) — smaller, proper sword proportions ─
+    let idle_rot = Quat::from_euler(EulerRot::XYZ,
+        (-24f32).to_radians(), (6f32).to_radians(), (16f32).to_radians());
+    let sword_root = commands.spawn((
+        Transform::from_xyz(0.26, -0.30, -0.42).with_rotation(idle_rot),
+        GlobalTransform::default(), Visibility::default(),
+        Sword { swinging: false, timer: 0.0, hit_registered: false },
+    )).set_parent(camera_e).id();
+
+    // Blade — very thin (0.007 depth = real sword thinness)
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.08, 0.44, 0.007))),
+        MeshMaterial3d(blade_mat),
+        Transform::from_xyz(0.0, 0.22, 0.0), Visibility::default(),
+    )).set_parent(sword_root);
+    // Bright edge strip (even thinner, offset to side)
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.010, 0.44, 0.009))),
+        MeshMaterial3d(blade_edge),
+        Transform::from_xyz(-0.045, 0.22, 0.0), Visibility::default(),
+    )).set_parent(sword_root);
+    // Crossguard
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.22, 0.046, 0.050))),
+        MeshMaterial3d(gold_mat.clone()),
+        Transform::from_xyz(0.0, -0.024, 0.0), Visibility::default(),
+    )).set_parent(sword_root);
+    // Grip
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.046, 0.16, 0.046))),
+        MeshMaterial3d(grip_mat),
+        Transform::from_xyz(0.0, -0.128, 0.0), Visibility::default(),
+    )).set_parent(sword_root);
+    // Pommel
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.068, 0.062, 0.062))),
+        MeshMaterial3d(gold_mat),
+        Transform::from_xyz(0.0, -0.237, 0.0), Visibility::default(),
+    )).set_parent(sword_root);
+
+    // ── Left hand: gauntlet + orb + lightning bolts ───────────
+    // Moved higher (-0.18 Y) so it's visible on screen
+    let hand_root = commands.spawn((
+        Transform::from_xyz(-0.23, -0.18, -0.40)
+            .with_rotation(Quat::from_euler(EulerRot::XYZ,
+                (-8f32).to_radians(), 0.0, (-10f32).to_radians())),
+        GlobalTransform::default(), Visibility::default(),
+        LightningOrb,
+    )).set_parent(camera_e).id();
+
+    // Gauntlet
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.13, 0.042, 0.11))),
+        MeshMaterial3d(gauntlet_m.clone()),
+        Transform::from_xyz(0.0, 0.0, 0.02), Visibility::default(),
+    )).set_parent(hand_root);
+    commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.13, 0.055, 0.036))),
+        MeshMaterial3d(gauntlet_m.clone()),
+        Transform::from_xyz(0.0, 0.028, -0.048), Visibility::default(),
+    )).set_parent(hand_root);
+    for fi in 0..3i32 {
+        commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.030, 0.022, 0.060))),
+            MeshMaterial3d(gauntlet_m.clone()),
+            Transform::from_xyz((fi-1) as f32 * 0.042, 0.018, -0.096), Visibility::default(),
+        )).set_parent(hand_root);
+    }
+    // Orb
+    commands.spawn((Mesh3d(meshes.add(Sphere::new(0.060))),
+        MeshMaterial3d(orb_mat.clone()),
+        Transform::from_xyz(0.0, 0.01, -0.18), Visibility::default(),
+    )).set_parent(hand_root);
+    // Glow shell
+    commands.spawn((Mesh3d(meshes.add(Sphere::new(0.085))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgba(0.3, 0.6, 1.0, 0.0),
+            emissive: LinearRgba::new(0.5, 1.0, 2.5, 1.0),
+            unlit: true, alpha_mode: AlphaMode::Add, ..default()
+        })),
+        Transform::from_xyz(0.0, 0.01, -0.18), Visibility::default(),
+    )).set_parent(hand_root);
+    // Static sparks around orb
+    for i in 0..4u32 {
+        let a = (i as f32 / 4.0) * std::f32::consts::TAU;
+        commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.014, 0.052, 0.014))),
+            MeshMaterial3d(spark_mat.clone()),
+            Transform::from_xyz(a.cos()*0.10, a.sin()*0.09, -0.18), Visibility::default(),
+        )).set_parent(hand_root);
+    }
+
+    // ── Lightning bolt segments (hidden until RMB held) ────────
+    // 7 bolts × 5 segments = 35 thin cuboid entities
+    let bolt_mesh  = meshes.add(Cuboid::new(0.016, 0.016, 0.22));
+    let bolt2_mesh = meshes.add(Cuboid::new(0.009, 0.009, 0.16));
+    for bolt_idx in 0..7u32 {
+        for seg_idx in 0..5u32 {
+            let m = if seg_idx < 3 { bolt_mat.clone() } else { bolt2_mat.clone() };
+            let msh = if seg_idx < 3 { bolt_mesh.clone() } else { bolt2_mesh.clone() };
+            commands.spawn((
+                Mesh3d(msh), MeshMaterial3d(m),
+                Transform::from_xyz(0.0, 0.01, -0.18),
+                Visibility::Hidden,
+                LightningBolt { bolt_idx, seg_idx },
+            )).set_parent(hand_root);
+        }
+    }
+}
+
+fn sword_swing(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    time: Res<Time>,
+    mut sword_q: Query<(&mut Transform, &mut Sword)>,
+    camera_q: Query<&GlobalTransform, With<PlayerCamera>>,
+    mut skeleton_q: Query<(Entity, &GlobalTransform, &mut Skeleton)>,
+    mut commands: Commands,
+) {
+    let window = windows.single();
+    let (mut t, mut sword) = sword_q.single_mut();
+
+    let idle_rot = Quat::from_euler(EulerRot::XYZ,
+        (-24f32).to_radians(), (6f32).to_radians(), (16f32).to_radians());
+    let idle_pos = Vec3::new(0.26, -0.30, -0.42);
+
+    if mouse.just_pressed(MouseButton::Left)
+        && window.cursor_options.grab_mode == CursorGrabMode::Locked
+        && !sword.swinging
+    {
+        sword.swinging = true;
+        sword.timer = 0.0;
+        sword.hit_registered = false;
+    }
+
+    if sword.swinging {
+        sword.timer += time.delta_secs();
+        let progress = (sword.timer / 0.38).min(1.0);
+        let arc = (progress * std::f32::consts::PI).sin();
+        let swing_rot = Quat::from_euler(EulerRot::XYZ,
+            (-55.0 * arc).to_radians(), (-35.0 * arc).to_radians(), 0.0f32.to_radians());
+        t.rotation    = idle_rot * swing_rot;
+        t.translation = idle_pos + Vec3::new(-0.12 * arc, 0.06 * arc, -0.08 * arc);
+
+        // Hit check at swing peak
+        if !sword.hit_registered && sword.timer > 0.14 {
+            sword.hit_registered = true;
+            let cam_gt = camera_q.single();
+            let (_, rot, cam_pos) = cam_gt.to_scale_rotation_translation();
+            let fwd = rot * Vec3::NEG_Z;
+            for (entity, skel_gt, mut skel) in skeleton_q.iter_mut() {
+                if skel.state == SkeletonState::Dead { continue; }
+                let to = skel_gt.translation() - cam_pos;
+                let dist = to.length();
+                if dist < 3.5 && dist > 0.1 && fwd.dot(to / dist) > 0.3 {
+                    skel.health -= 1.0;
+                    if skel.health <= 0.0 {
+                        skel.state = SkeletonState::Dead;
+                        commands.entity(entity).despawn_recursive();
+                    }
+                }
+            }
+        }
+
+        if sword.timer >= 0.38 {
+            sword.swinging = false;
+            t.rotation    = idle_rot;
+            t.translation = idle_pos;
+        }
+    }
+}
+
+fn animate_lightning(
+    time: Res<Time>,
+    mut orb_q: Query<&mut Transform, With<LightningOrb>>,
+) {
+    // Pulse the hand_root scale so the orb + sparks breathe
+    for mut t in orb_q.iter_mut() {
+        let pulse = 1.0 + (time.elapsed_secs() * 6.0).sin() * 0.07;
+        t.scale = Vec3::splat(pulse);
+    }
+}
+
+fn lightning_bolts(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    time: Res<Time>,
+    mut bolt_q: Query<(&mut Transform, &mut Visibility, &LightningBolt)>,
+) {
+    let window = windows.single();
+    let active = mouse.pressed(MouseButton::Right)
+        && window.cursor_options.grab_mode == CursorGrabMode::Locked;
+
+    // Snap time to ~22 Hz so bolts flicker rather than animate smoothly
+    let t = (time.elapsed_secs() * 22.0).floor() / 22.0;
+
+    // Spread directions per bolt (x, y per unit of z-depth)
+    let dirs: &[(f32, f32)] = &[
+        ( 0.00,  0.00),   // center
+        ( 0.20,  0.12),   // upper-right
+        (-0.20,  0.12),   // upper-left
+        ( 0.20, -0.10),   // lower-right
+        (-0.20, -0.10),   // lower-left
+        ( 0.00,  0.28),   // straight up
+        ( 0.00, -0.16),   // slightly down
+    ];
+
+    for (mut tr, mut vis, bolt) in bolt_q.iter_mut() {
+        if !active { *vis = Visibility::Hidden; continue; }
+        *vis = Visibility::Visible;
+
+        let (dx, dy) = dirs[bolt.bolt_idx as usize % dirs.len()];
+        let depth   = 0.22 + bolt.seg_idx as f32 * 0.28;
+        let spread  = 1.0  + bolt.seg_idx as f32 * 0.45;
+
+        // Hash-derived jitter — different per bolt, segment, and time snapshot
+        let s   = bolt.bolt_idx as f32 * 11.3 + bolt.seg_idx as f32 * 7.9 + t * 43.0;
+        let jx  = (s * 127.1).sin()         * 0.038 * (bolt.seg_idx + 1) as f32;
+        let jy  = (s * 311.7 + 1.4).cos()   * 0.038 * (bolt.seg_idx + 1) as f32;
+
+        tr.translation = Vec3::new(
+            dx * depth * spread + jx,
+            0.01 + dy * depth * spread + jy,
+            -0.18 - depth,            // extends forward from palm
+        );
+
+        // Slight pitch/yaw makes each segment look jagged
+        let rx = (s * 73.1  + 2.7).sin() * 0.40;
+        let ry = (s * 189.3 + 0.9).cos() * 0.40;
+        tr.rotation = Quat::from_euler(EulerRot::XYZ, rx, ry, 0.0);
+    }
+}
+
+// ── Skeletons ─────────────────────────────────────────────────────────────────
+fn spawn_skeletons(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let bone = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.80, 0.76, 0.64),
+        perceptual_roughness: 0.9, ..default()
+    });
+    // Pre-build mesh handles (shared across all skeletons)
+    let head    = meshes.add(Cuboid::new(0.22, 0.22, 0.22));
+    let torso   = meshes.add(Cuboid::new(0.30, 0.52, 0.13));
+    let pelvis  = meshes.add(Cuboid::new(0.26, 0.17, 0.11));
+    let thigh   = meshes.add(Cuboid::new(0.10, 0.34, 0.10));
+    let shin    = meshes.add(Cuboid::new(0.09, 0.34, 0.09));
+    let uarm    = meshes.add(Cuboid::new(0.09, 0.28, 0.09));
+    let farm    = meshes.add(Cuboid::new(0.08, 0.26, 0.08));
+    let spear   = meshes.add(Cuboid::new(0.038, 1.6, 0.038));
+
+    let positions = [
+        Vec3::new( 5.0, 0.0, -22.0),
+        Vec3::new(-8.0, 0.0, -30.0),
+        Vec3::new(12.0, 0.0, -36.0),
+        Vec3::new(-5.0, 0.0, -26.0),
+        Vec3::new( 8.0, 0.0, -52.0),
+        Vec3::new(-14.0,0.0, -55.0),
+        Vec3::new( 6.0, 0.0, -78.0),
+        Vec3::new(-12.0,0.0, -88.0),
+    ];
+
+    for (i, pos) in positions.iter().enumerate() {
+        let angle = i as f32 * 0.9 + 0.5;
+        let patrol_dir = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let b = bone.clone();
+        commands.spawn((
+            Transform::from_translation(*pos),
             GlobalTransform::default(),
             Visibility::default(),
-            PlayerVelocity { vertical: 0.0 },
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Camera3d::default(),
-                Transform::from_xyz(0.0, 1.7, 0.0),
-                PlayerCamera { pitch: 0.0, bob_timer: 0.0 },
-            ));
+            Skeleton { health: 5.0, state: SkeletonState::Patrol,
+                attack_timer: 1.5, patrol_timer: 2.0 + i as f32 * 0.4, patrol_dir },
+        )).with_children(|p| {
+            // head
+            p.spawn((Mesh3d(head.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz( 0.00, 1.72, 0.0)));
+            // torso
+            p.spawn((Mesh3d(torso.clone()),  MeshMaterial3d(b.clone()), Transform::from_xyz( 0.00, 1.14, 0.0)));
+            // pelvis
+            p.spawn((Mesh3d(pelvis.clone()), MeshMaterial3d(b.clone()), Transform::from_xyz( 0.00, 0.77, 0.0)));
+            // thighs
+            p.spawn((Mesh3d(thigh.clone()),  MeshMaterial3d(b.clone()), Transform::from_xyz(-0.10, 0.52, 0.0)));
+            p.spawn((Mesh3d(thigh.clone()),  MeshMaterial3d(b.clone()), Transform::from_xyz( 0.10, 0.52, 0.0)));
+            // shins
+            p.spawn((Mesh3d(shin.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz(-0.10, 0.17, 0.0)));
+            p.spawn((Mesh3d(shin.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz( 0.10, 0.17, 0.0)));
+            // upper arms
+            p.spawn((Mesh3d(uarm.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz(-0.23, 1.28, 0.0)));
+            p.spawn((Mesh3d(uarm.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz( 0.23, 1.28, 0.0)));
+            // forearms
+            p.spawn((Mesh3d(farm.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz(-0.25, 0.97, 0.0)));
+            p.spawn((Mesh3d(farm.clone()),   MeshMaterial3d(b.clone()), Transform::from_xyz( 0.25, 0.97, 0.0)));
+            // spear
+            p.spawn((Mesh3d(spear.clone()),  MeshMaterial3d(b.clone()), Transform::from_xyz( 0.40, 0.82, 0.0)));
         });
+    }
+}
+
+fn skeleton_ai(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut skel_q: Query<(Entity, &mut Transform, &mut Skeleton)>,
+    player_q: Query<&Transform, (With<Player>, Without<Skeleton>)>,
+    mut health: ResMut<PlayerHealth>,
+) {
+    if health.hurt_timer > 0.0 { health.hurt_timer -= time.delta_secs(); }
+    let pt = player_q.single();
+    let pp = pt.translation;
+
+    for (entity, mut t, mut sk) in skel_q.iter_mut() {
+        if sk.state == SkeletonState::Dead { continue; }
+        let flat = Vec3::new(pp.x - t.translation.x, 0.0, pp.z - t.translation.z);
+        let dist = flat.length();
+
+        // State transitions
+        sk.state = if dist < 2.2 { SkeletonState::Attack }
+                   else if dist < 20.0 { SkeletonState::Chase }
+                   else { SkeletonState::Patrol };
+
+        match sk.state.clone() {
+            SkeletonState::Patrol => {
+                sk.patrol_timer -= time.delta_secs();
+                if sk.patrol_timer <= 0.0 {
+                    let s = t.translation.x * 7.3 + t.translation.z * 3.1 + time.elapsed_secs();
+                    sk.patrol_dir = Vec3::new(s.sin(), 0.0, s.cos()).normalize();
+                    sk.patrol_timer = 2.5 + (s.abs() % 1.8);
+                }
+                t.translation += sk.patrol_dir * 1.5 * time.delta_secs();
+                t.translation.y = 0.0;
+                let look = t.translation + sk.patrol_dir;
+                if (look - t.translation).length_squared() > 0.01 { t.look_at(look, Vec3::Y); }
+            }
+            SkeletonState::Chase => {
+                if dist > 0.1 {
+                    let dir = flat.normalize();
+                    t.translation += dir * 3.0 * time.delta_secs();
+                    t.translation.y = 0.0;
+                    let ty = t.translation.y; t.look_at(Vec3::new(pp.x, ty, pp.z), Vec3::Y);
+                }
+            }
+            SkeletonState::Attack => {
+                let ty = t.translation.y; t.look_at(Vec3::new(pp.x, ty, pp.z), Vec3::Y);
+                sk.attack_timer -= time.delta_secs();
+                if sk.attack_timer <= 0.0 && health.hurt_timer <= 0.0 {
+                    health.hearts = (health.hearts - 1).max(0);
+                    health.hurt_timer = 0.9;
+                    sk.attack_timer = 1.5;
+                }
+            }
+            SkeletonState::Dead => { commands.entity(entity).despawn_recursive(); }
+        }
+    }
+}
+
+fn lightning_damage(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    time: Res<Time>,
+    camera_q: Query<&GlobalTransform, With<PlayerCamera>>,
+    mut skel_q: Query<(Entity, &GlobalTransform, &mut Skeleton)>,
+    mut commands: Commands,
+) {
+    let window = windows.single();
+    if !mouse.pressed(MouseButton::Right) { return; }
+    if window.cursor_options.grab_mode != CursorGrabMode::Locked { return; }
+    let cam = camera_q.single();
+    let (_, rot, pos) = cam.to_scale_rotation_translation();
+    let fwd = rot * Vec3::NEG_Z;
+    for (entity, sgt, mut sk) in skel_q.iter_mut() {
+        if sk.state == SkeletonState::Dead { continue; }
+        let to = sgt.translation() + Vec3::Y - pos;
+        let dist = to.length();
+        if dist < 0.5 { continue; }
+        if dist < 9.0 && fwd.dot(to / dist) > 0.5 {
+            sk.health -= 2.0 * time.delta_secs();
+            if sk.health <= 0.0 {
+                sk.state = SkeletonState::Dead;
+                commands.entity(entity).despawn_recursive();
+            }
+        }
+    }
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+fn setup_hud(mut commands: Commands) {
+    commands.spawn(Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(18.0),
+        top: Val::Px(18.0),
+        flex_direction: FlexDirection::Row,
+        column_gap: Val::Px(8.0),
+        ..default()
+    }).with_children(|p| {
+        for i in 0..5u32 {
+            p.spawn((
+                Node { width: Val::Px(32.0), height: Val::Px(32.0), ..default() },
+                BackgroundColor(Color::srgb(0.85, 0.10, 0.10)),
+                HeartNode { index: i },
+            ));
+        }
+    });
+}
+
+fn update_hearts(
+    health: Res<PlayerHealth>,
+    mut hearts: Query<(&mut BackgroundColor, &HeartNode)>,
+) {
+    for (mut bg, h) in hearts.iter_mut() {
+        bg.0 = if (h.index as i32) < health.hearts {
+            Color::srgb(0.88, 0.12, 0.12)
+        } else {
+            Color::srgb(0.20, 0.05, 0.05)
+        };
+    }
 }
 
 fn spawn_castle(
