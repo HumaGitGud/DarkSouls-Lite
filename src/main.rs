@@ -84,10 +84,10 @@ fn setup(
     // Ground
     let grass = make_grass_texture(&mut images);
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(400.0, 400.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color_texture: Some(grass),
-            uv_transform: bevy::math::Affine2::from_scale(Vec2::new(50.0, 50.0)),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::new(100.0, 100.0)),
             perceptual_roughness: 1.0,
             ..default()
         })),
@@ -145,6 +145,61 @@ fn setup(
             Mesh3d(star_mesh.clone()),
             MeshMaterial3d(star_mat.clone()),
             Transform::from_xyz(x, y, z).with_scale(Vec3::splat(size)),
+        ));
+    }
+
+    // --- Trees (low-poly pine: trunk + two stacked cones) ---
+    let trunk_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.35, 0.20, 0.09),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    let leaf_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.09, 0.30, 0.11),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    // .resolution(6) = 6-sided faceted cone — angular low-poly PS1 look
+    let trunk_mesh = meshes.add(Cuboid::new(0.5, 4.5, 0.5));
+    let cone_lo    = meshes.add(Cone { radius: 3.5, height: 6.5 }.mesh().resolution(6));
+    let cone_mid   = meshes.add(Cone { radius: 2.2, height: 4.5 }.mesh().resolution(6));
+    let cone_hi    = meshes.add(Cone { radius: 1.2, height: 3.0 }.mesh().resolution(6));
+
+    for i in 0..80u32 {
+        let t     = i as f32;
+        let angle = t * 137.508_f32.to_radians();
+        let dist  = (18.0 + t * 1.5_f32).min(175.0);
+        let x     = dist * angle.cos();
+        let z     = dist * angle.sin();
+
+        if x.abs() < 14.0 && z > -6.0 && z < 22.0 { continue; }   // player spawn
+        if x.abs() < 42.0 && z < -28.0 && z > -110.0 { continue; } // castle zone
+
+        let base = Vec3::new(x, 0.0, z);
+
+        // Trunk: height 4.5, center at y=2.25
+        commands.spawn((
+            Mesh3d(trunk_mesh.clone()),
+            MeshMaterial3d(trunk_mat.clone()),
+            Transform::from_translation(base + Vec3::Y * 2.25),
+        ));
+        // Bottom cone: h=6.5, center at y=7.5 → base at 4.25, tip at 10.75
+        commands.spawn((
+            Mesh3d(cone_lo.clone()),
+            MeshMaterial3d(leaf_mat.clone()),
+            Transform::from_translation(base + Vec3::Y * 7.5),
+        ));
+        // Mid cone: h=4.5, center at y=9.5 → base at 7.25, tip at 11.75
+        commands.spawn((
+            Mesh3d(cone_mid.clone()),
+            MeshMaterial3d(leaf_mat.clone()),
+            Transform::from_translation(base + Vec3::Y * 9.5),
+        ));
+        // Top cone: h=3.0, center at y=11.25 → base at 9.75, tip at 12.75
+        commands.spawn((
+            Mesh3d(cone_hi.clone()),
+            MeshMaterial3d(leaf_mat.clone()),
+            Transform::from_translation(base + Vec3::Y * 11.25),
         ));
     }
 
