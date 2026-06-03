@@ -1,6 +1,6 @@
 # Dark Souls Lite
 
-A retro low-poly first-person dark fantasy game built with **Rust + Bevy**. Roam a moonlit field ringed by snowy mountains, fight roaming undead, and storm a torch-lit castle to face a dragon boss — while the Eye of Sauron watches from its tower.
+A retro low-poly first-person dark fantasy game built with **Rust + Bevy**. Roam a moonlit field ringed by snowy mountains, fight roaming undead, and storm a torch-lit castle to face a dragon boss — while the Eye of Sauron watches from its tower. Claude Opus 4.8 was heavily utilized as part of the exercise to agentic developing.
 
 ## Prerequisites
 
