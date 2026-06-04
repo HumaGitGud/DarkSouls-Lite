@@ -1,6 +1,6 @@
 # Dark Souls Lite
 
-A retro low-poly first-person dark fantasy game built with **Rust + Bevy**. Roam a moonlit field ringed by snowy mountains, fight roaming undead, and storm a torch-lit castle to face a dragon boss — while the Eye of Sauron watches from its tower.
+A retro low-poly first-person dark fantasy game built with **Rust + Bevy**. Roam a moonlit field of fog, embers, gravestones and ruins, rest at bonfires, fight roaming undead, and storm a torch-lit castle to slay a dragon boss — while the Eye of Sauron watches from its tower.
 
 ## Prerequisites
 
@@ -20,42 +20,49 @@ First build compiles Bevy (~5–10 min); later builds are ~15s.
 | Key / Button | Action |
 |---|---|
 | `W A S D` | Move |
-| `Shift` | Sprint |
+| `Shift` | Sprint (uses stamina) |
+| `Left Ctrl` | **Dodge roll** (i-frames, costs stamina) |
 | `Space` | Jump |
 | `Mouse` | Look around |
-| `Left Click` | Grab cursor / **Sword swing** |
-| `Right Click (hold)` | **Lightning** (Palpatine-style forked bolts) |
+| `Left Click` | Grab cursor / use selected item (sword / gun / drink potion) |
+| `Right Click (hold)` | **Lightning** (uses mana) |
+| `Scroll Wheel` | Cycle hotbar item |
+| `R` | **Rest at a nearby bonfire** (full heal, refill potions/mana) |
 | `Esc` | Release cursor |
 
-## Your Character
+## Combat & survival
 
-- **Right hand** — a detailed knight's sword (steel blade, gold guard, crimson grip)
-- **Left hand** — an open hand holding a **glowing spell tome** that casts lightning
-
-## Combat
-
-- **Sword** — 1 damage per swing; enemies flash red and get knocked back
-- **Lightning** — 2 damage/sec in a forward cone; enemies crackle with a **blue shock aura**, and a white flash lights the area
-- **Health** — 5 hearts (top-left). Taking a hit flashes red screen corners and knocks you back
-- **Death** — at 0 hearts a **"YOU'RE DEAD"** screen appears with a **Respawn** button that restarts the run
+- **Sword** — flashes enemies red + knockback. **Lightning** — drains mana; enemies flash white/blue while shocked.
+- **Glock** (hitscan beam) and **Rocket Launcher** (nuke mushroom) found in the castle.
+- **Dodge roll** grants brief invulnerability — time it against attacks.
+- **Hearts / Stamina / Mana** bars top-left; a **Minecraft-style hotbar** at the bottom with potion counts.
+- **Red potions** heal 2 hearts, **blue potions** refill mana (drink animation).
+- **Bonfires** (one at spawn, one outside the castle) restore everything when you press `R`.
+- **Death** → a **"YOU DIED"** screen → respawn. **Slaying the dragon** → a **"VICTORY ACHIEVED"** screen.
 
 ## Enemies
 
 | Enemy | Behavior |
 |---|---|
-| **Skeletons** | Patrol, then chase and jab with couched spears (5 HP) |
-| **Witches** | Fast-chasing sorceresses (4 HP) |
-| **Knights** | Slow but tanky armored foes (7 HP) |
-| **Bats** | Fast flyers that swarm in groups of 3 (2 HP) |
-| **Dragon** | Boss at the castle gate — shoots 3-fireball bursts (20 HP) |
-| **Eye of Sauron** | Spire tower that locks on and fires a continuous lightning beam when you get close |
+| **Skeletons** | Patrol, then chase and jab with couched spears |
+| **Witches** | Cast purple magic missiles from range |
+| **Orcs** | Plant their feet and slam a hammer (dirt debris shockwave) |
+| **Bats** | Fast flyers that swarm in groups of three |
+| **Black Knights** | Rare blackened-plate elites with a greatsword — tanky and quick |
+| **Eye of Sauron** | Spire tower that locks on and fires a continuous lightning beam |
+| **Dragon (boss)** | See below — health bar appears when engaged |
+
+### The Dragon — two phases
+- **Phase 1**: grounded, lobs single huge fireballs.
+- **Phase 2 (≤50% HP)**: roars at the sky (slows you 30%), stomps **3 expanding shockwaves** (jump to dodge), takes flight, then soars erratically and periodically swoops in for a **dragonbreath** — a continuous red laser with a yellow core that sweeps up toward you (near-instant death).
 
 ## World
 
-- Large open map enclosed by **chunky snow-capped mountains**
-- A pine forest, a **lit castle** with towers/keep/braziers, and the **Eye of Sauron spire**
-- **Solid collision** on walls, towers, pillars, the spire, and trees
-- Stylized night sky: square moon, scattered stars, head-bob, dodge-jump feel
+- Large moonlit map ringed by **natural jagged snow-capped mountains** and foothills.
+- A pine forest, a grand **lit castle** (banners, throne, royal carpet, boss fog gate) with the dragon inside.
+- The **Eye of Sauron spire** looming over the far corner.
+- Dark Souls atmosphere: **bonfires, gravestones, ruined pillars, drifting fog, rising embers, and soapstone messages**.
+- **Solid collision** on walls, towers, pillars, ruins, the spire, and trees.
 
 ## Stack
 
