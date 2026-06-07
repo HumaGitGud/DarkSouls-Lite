@@ -1,4 +1,4 @@
-# Dark Souls Lite
+# Dark Slop Souls 
 
 A retro low-poly first-person dark fantasy game built with **Rust + Bevy**. Explore a vast, fog-drowned kingdom, face what stirs in its ruins, and discover where its paths lead.
 
