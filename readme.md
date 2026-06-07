@@ -1,6 +1,6 @@
-# Dark Slop Souls 
+# Slop Souls 
 
-A retro low-poly first-person dark fantasy game built with **Rust + Bevy**. Explore a vast, fog-drowned kingdom, face what stirs in its ruins, and discover where its paths lead.
+A retro low-poly first-person dark fantasy game built with **Rust + Bevy**. Explore a vast, fog-drowned kingdom, face what stirs in its ruins, and discover where its paths lead. Claude Opus 4.8 was heavily utilized as part of the agentic development exercise.
 
 ## Prerequisites
 
